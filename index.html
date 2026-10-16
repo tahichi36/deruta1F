@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>アイテムスポーンマップ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<style>
+  html, body { height: 100%; margin: 0; font-family: sans-serif; }
+  #map { height: 100%; background: #1b1b1b; }
+
+  /* フィルタパネル */
+  #panel {
+    position: absolute; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(255,255,255,.95); border-radius: 8px;
+    padding: 10px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3);
+    font-size: 14px; max-width: 220px;
+  }
+  #panel h3 { margin: 0 0 6px; font-size: 14px; }
+  #panel label { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #555; flex: none; }
+  #status { margin-top: 6px; font-size: 12px; color: #666; }
+  #status.error { color: #c00; font-weight: bold; }
+
+  /* 座標取得モード */
+  #editbox {
+    position: absolute; bottom: 10px; left: 10px; z-index: 1000;
+    background: #fff8c5; border: 1px solid #c9a800; border-radius: 6px;
+    padding: 8px 10px; font-size: 13px; display: none;
+  }
+
+  /* ポップアップ */
+  .popup-title { font-weight: bold; font-size: 15px; margin-bottom: 2px; }
+  .popup-type { font-size: 12px; color: #666; margin-bottom: 6px; }
+  .popup-img { display: block; width: 100%; max-width: 320px; border-radius: 4px; background: #ddd; }
+  .popup-note { margin-top: 6px; font-size: 13px; }
+  .leaflet-popup-content { min-width: 220px; }
+
+  /* 依頼アイテムの目印（星形） */
+  .quest-icon { font-size: 26px; line-height: 26px; text-align: center; color: #ffd400;
+                text-shadow: 0 0 3px #000, 0 0 3px #000; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <h3>表示するアイテム</h3>
+  <div id="filters"></div>
+  <div id="status">読み込み中…</div>
+</div>
+
+<div id="editbox"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script>
+/* =====================================================
+   設定（ここだけ書き換えればOK）
+   ===================================================== */
+const CONFIG = {
+  // マップ画像のファイル名とサイズ（ピクセル）
+  MAP_IMAGE: "derutaikkai.png",
+  MAP_WIDTH: 3944,
+  MAP_HEIGHT: 4936,
+
+  // Googleスプレッドシートの「ウェブに公開」CSVのURL。
+  // 空のままだと、下のSAMPLE_DATA（試験用データ）が表示されます。
+  SHEET_URL: "https://docs.google.com/spreadsheets/d/e/2PACX-1vThO4HK5l9wLPqh-ke84RSxDUYeZIAISiASvf82OiKIT1EynHSkkQzUEBngBFYpiuCA4Hmer9SGQgyv/pub?gid=1632115259&single=true&output=csv",
+
+  // スクリーンショット画像を置くフォルダ名
+  IMAGE_DIR: "images/",
+
+  // アイテム種別（スプレッドシートの「種別」列と同じ表記にしてください）
+  TYPES: {
+    "ガソリン":   { color: "#e8590c" },
+    "バッテリー": { color: "#1c7ed6" },
+    "機密文書":   { color: "#2f9e44" },
+    "依頼アイテム": { color: "#ffd400", quest: true }
+  }
+};
+
+/* 試験用データ（SHEET_URLが空のときだけ使われます） */
+const SAMPLE_DATA = [
+  { id: "G001", x: 1000, y: 1200, type: "ガソリン",   name: "ガソリン（サンプル）",   image: "", note: "ここはサンプルです" },
+  { id: "B001", x: 2000, y: 2500, type: "バッテリー", name: "バッテリー（サンプル）", image: "", note: "" },
+  { id: "D001", x: 3000, y: 3500, type: "機密文書",   name: "機密文書（サンプル）",   image: "", note: "" },
+  { id: "Q001", x: 1500, y: 4200, type: "依頼アイテム", name: "依頼アイテム①（サンプル）", image: "", note: "" },
+  { id: "Q002", x: 3200, y: 800,  type: "依頼アイテム", name: "依頼アイテム②（サンプル）", image: "", note: "" }
+];
+
+/* =====================================================
+   以下は触らなくて大丈夫です
+   ===================================================== */
+const W = CONFIG.MAP_WIDTH, H = CONFIG.MAP_HEIGHT;
+
+// 画像の左上を(0,0)、右へX、下へYとする座標を、Leafletの座標へ変換
+const toLatLng = (x, y) => L.latLng(H - y, x);
+const toXY = (latlng) => ({ x: Math.round(latlng.lng), y: Math.round(H - latlng.lat) });
+
+const bounds = [[0, 0], [H, W]];
+const map = L.map("map", {
+  crs: L.CRS.Simple,
+  minZoom: -5,
+  maxZoom: 2,
+  zoomSnap: 0.25,
+  zoomDelta: 0.5,
+  attributionControl: false
+});
+L.imageOverlay(CONFIG.MAP_IMAGE, bounds).addTo(map);
+map.fitBounds(bounds);
+map.setMinZoom(map.getZoom() - 0.5);
+map.setMaxBounds(L.latLngBounds(bounds).pad(0.2));
+
+const statusEl = document.getElementById("status");
+const filtersEl = document.getElementById("filters");
+const layers = {};   // 種別ごとのレイヤー
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function imageSrc(name) {
+  if (!name) return "";
+  return /^https?:\/\//.test(name) ? name : CONFIG.IMAGE_DIR + encodeURIComponent(name);
+}
+
+function popupHtml(r) {
+  const src = imageSrc(r.image);
+  const img = src
+    ? `<img class="popup-img" loading="lazy" src="${escapeHtml(src)}" alt="${escapeHtml(r.name)}"
+            onerror="this.outerHTML='<div class=popup-note>（スクリーンショットは準備中です）</div>'">`
+    : "";
+  return `<div class="popup-title">${escapeHtml(r.name || r.type)}</div>
+          <div class="popup-type">${escapeHtml(r.type)}</div>
+          ${img}
+          ${r.note ? `<div class="popup-note">${escapeHtml(r.note)}</div>` : ""}`;
+}
+
+function buildLayers() {
+  Object.entries(CONFIG.TYPES).forEach(([type, t]) => {
+    layers[type] = t.quest
+      ? L.layerGroup()                                  // 依頼アイテムはまとめず常に個別表示
+      : L.markerClusterGroup({ maxClusterRadius: 45, showCoverageOnHover: false });
+    layers[type].addTo(map);
+
+    const label = document.createElement("label");
+    label.innerHTML = `<input type="checkbox" checked data-type="${escapeHtml(type)}">
+                       <span class="dot" style="background:${t.color}"></span>
+                       <span>${escapeHtml(type)} <small data-count="${escapeHtml(type)}"></small></span>`;
+    filtersEl.appendChild(label);
+  });
+
+  filtersEl.addEventListener("change", e => {
+    const type = e.target.dataset.type;
+    if (!type) return;
+    e.target.checked ? map.addLayer(layers[type]) : map.removeLayer(layers[type]);
+  });
+}
+
+function addRows(rows) {
+  const counts = {};
+  let skipped = 0;
+  rows.forEach(r => {
+    const x = parseFloat(r.x), y = parseFloat(r.y);
+    const type = (r.type || "").trim();
+    const t = CONFIG.TYPES[type];
+    if (!isFinite(x) || !isFinite(y) || !t) { skipped++; return; }
+
+    let marker;
+    if (t.quest) {
+      marker = L.marker(toLatLng(x, y), {
+        icon: L.divIcon({ className: "", html: `<div class="quest-icon">★</div>`, iconSize: [26, 26], iconAnchor: [13, 13] })
+      });
+    } else {
+      marker = L.circleMarker(toLatLng(x, y), {
+        radius: 8, color: "#fff", weight: 2, fillColor: t.color, fillOpacity: 0.95
+      });
+    }
+    marker.bindPopup(popupHtml({ ...r, type }), { maxWidth: 340 });
+    layers[type].addLayer(marker);
+    counts[type] = (counts[type] || 0) + 1;
+  });
+
+  Object.keys(CONFIG.TYPES).forEach(type => {
+    const el = document.querySelector(`[data-count="${type}"]`);
+    if (el) el.textContent = `(${counts[type] || 0})`;
+  });
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  statusEl.textContent = `${total}件の地点を表示中` + (skipped ? `（${skipped}行は座標か種別の不備でスキップ）` : "");
+}
+
+function loadData() {
+  if (!CONFIG.SHEET_URL) {
+    addRows(SAMPLE_DATA);
+    statusEl.textContent += "（試験用データ）";
+    return;
+  }
+  Papa.parse(CONFIG.SHEET_URL, {
+    download: true,
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: h => ({ "ID": "id", "X": "x", "Y": "y", "X座標": "x", "Y座標": "y",
+                              "種別": "type", "名前": "name", "画像": "image", "画像ファイル名": "image", "メモ": "note" }[h.trim()] || h.trim().toLowerCase()),
+    complete: res => addRows(res.data),
+    error: () => { statusEl.textContent = "スプレッドシートを読み込めませんでした。公開設定とURLを確認してください。"; statusEl.className = "error"; }
+  });
+}
+
+/* ---- 座標取得モード：URLの末尾に ?edit をつけて開く ---- */
+if (new URLSearchParams(location.search).has("edit")) {
+  const box = document.getElementById("editbox");
+  box.style.display = "block";
+  box.textContent = "座標取得モード：マップをクリックすると、その位置の座標をコピーします";
+  let temp;
+  map.on("click", e => {
+    const { x, y } = toXY(e.latlng);
+    const text = `${x}\t${y}`;           // タブ区切り → スプレッドシートに貼ると X列・Y列に分かれて入る
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+    box.textContent = `コピーしました： X=${x}  Y=${y}  （スプレッドシートのX列に貼り付け）`;
+    if (temp) map.removeLayer(temp);
+    temp = L.circleMarker(e.latlng, { radius: 6, color: "#f0f", weight: 3, fillOpacity: 0 }).addTo(map);
+  });
+}
+
+buildLayers();
+loadData();
+</script>
+</body>
+</html>
